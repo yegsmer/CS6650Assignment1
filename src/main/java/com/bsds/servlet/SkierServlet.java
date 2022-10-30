@@ -1,110 +1,110 @@
 package com.bsds.servlet;
 
-import com.bsds.models.Message;
-import com.bsds.models.Skiers;
-import javax.servlet.*;
-import javax.servlet.http.*;
-import javax.servlet.annotation.*;
+import com.bsds.RMQChannelFactory;
+import com.bsds.RMQChannelPool;
 import java.io.IOException;
-import com.google.gson.Gson;
+import com.rabbitmq.client.ConnectionFactory;
+import com.rabbitmq.client.Channel;
+import java.io.BufferedReader;
+import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeoutException;
+import javax.servlet.ServletException;
+import javax.servlet.annotation.WebServlet;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 
 @WebServlet(name = "SkierServlet", value = "/SkierServlet")
 public class SkierServlet extends HttpServlet {
 
-    private Gson gson = new Gson();
-    private final int MIN_DAY = 1;
-    private final int MAX_DAY = 366;
-    private final String SEASONS_PARAMETER = "seasons";
-    private final String DAYS_PARAMETER = "days";
-    private final String SKIERS_PARAMETER = "skiers";
+    private final static String RABBITMQ_URL = "172.31.23.23";
+    private final static Integer MAX_CHANNEL_POOL_SIZE = 100;
+    private final static String QUEUE_NAME = "skiersQueue";
+    private RMQChannelPool rmqChannelPool;
 
     @Override
-    protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+    public void init() throws ServletException {
+        ConnectionFactory connectionFactory = new ConnectionFactory();
+        connectionFactory.setHost(RABBITMQ_URL);
+        RMQChannelFactory rmqChannelFactory;
+        try {
+            rmqChannelFactory = new RMQChannelFactory(connectionFactory.newConnection());
+        } catch (IOException | TimeoutException e) {
+            throw new RuntimeException("Error: failed to create new connection. " + e);
+        }
+        this.rmqChannelPool = new RMQChannelPool(MAX_CHANNEL_POOL_SIZE, rmqChannelFactory);
+    }
+
+    protected void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
         response.setContentType("text/plain");
         String urlPath = request.getPathInfo();
+        if (urlPath != null && !urlPath.isEmpty()) {
+            String[] urlParts = urlPath.split("/");
+            if (!this.isUrlValid(urlParts)) {
+                response.setStatus(400);
+                response.getWriter().write("This is an invalid URL");
+            } else {
+                response.setStatus(200);
+                response.getWriter().write("Success");
+            }
 
-        // check we have a URL!
-        if (urlPath == null || urlPath.isEmpty()) {
-            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-            response.getWriter().write("missing paramterers");
-            return;
-        }
-
-        String[] urlParts = urlPath.split("/");
-        // and now validate url path and return the response status code
-        // (and maybe also some value if input is valid)
-
-        if (!isUrlValid(urlParts)) {
-            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
         } else {
-            response.setStatus(HttpServletResponse.SC_OK);
-            // do any sophisticated processing with urlParts which contains all the url params
-            // TODO: process url params in `urlParts`
-            response.getWriter().write("It works!");
+            response.setStatus(404);
+            response.getWriter().write("The url is null or empty. Try again");
         }
     }
 
     private boolean isUrlValid(String[] urlPath) {
-
-        // urlPath  = "/1/seasons/2019/day/1/skier/123"
-        // urlParts = [, 1, seasons, 2019, day, 1, skier, 123]
-
-        if(urlPath.length != 8) return false;
-
-        try {
-            // validate the range of values
-            return urlPath[3].length() == 4
-                && Integer.valueOf(urlPath[5]) >= MIN_DAY
-                && Integer.valueOf(urlPath[5]) <= MAX_DAY
-                && urlPath[2].equals(SEASONS_PARAMETER)
-                && urlPath[4].equals(DAYS_PARAMETER)
-                && urlPath[6].equals(SKIERS_PARAMETER);
-        } catch (Exception e) {
+        if (urlPath.length == 3) {
+            return urlPath[0].equals("skiers") && urlPath[2].equals("vertical");
+        } else if (urlPath.length != 8) {
             return false;
+        } else {
+            return urlPath[0].equals("skiers") && urlPath[2].equals("seasons") && urlPath[4].equals("days") && urlPath[6].equals("skiers");
         }
-
     }
 
-    @Override
-    protected void doPost(HttpServletRequest request, HttpServletResponse response)
-        throws ServletException, IOException {
-        processRequest(request, response);
-
+    protected void doPost(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+        String payload;
+        PrintWriter out = response.getWriter();
+        payload = this.processData(request, response);
+        this.publish(payload);
+        response.setStatus(200);
+        out.println("<h1>successfully add!</h1>");
+        out.flush();
     }
 
-    protected void processRequest(HttpServletRequest request, HttpServletResponse response)
-        throws ServletException, IOException {
-
+    protected String processData(HttpServletRequest request, HttpServletResponse response) {
         response.setContentType("application/json");
-        response.setCharacterEncoding("UTF-8");
-        String urlPath = request.getPathInfo();
 
-        // check we have a URL!
-        if (urlPath == null || urlPath.isEmpty()) {
-            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-            response.getWriter().write("missing paramterers");
-            return;
-        }
-
-        String[] urlParts = urlPath.split("/");
-
-        if (!isUrlValid(urlParts)) {
-            Message message = new Message("string");
-            response.getWriter().write(gson.toJson(message));
-            response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
-        }
-
+        // format Json Payload
+        StringBuilder body = new StringBuilder();
+        String line;
+        BufferedReader reader = null;
         try {
-            StringBuilder sb = new StringBuilder();
-            String s;
-            while ((s = request.getReader().readLine()) != null) {
-                sb.append(s);
-            }
-
-            Skiers skier = gson.fromJson(sb.toString(), Skiers.class);
-            response.setStatus(HttpServletResponse.SC_OK);
-        } catch (Exception ex) {
-            ex.printStackTrace();
+            reader = request.getReader();
+            while ((line = reader.readLine()) != null)
+                body.append(line);
+        } catch (IOException e) {
+            response.setStatus(404);
+            throw new RuntimeException("Error: failed to process the request. " + e);
         }
+        return request.getPathInfo() + "/body/" + body.toString();
+    }
+
+    // Publish payload to RabbitMQ
+    protected void publish(String message){
+
+        Channel channel = this.rmqChannelPool.borrowObject();
+        try {
+            channel.queueDeclare(QUEUE_NAME, false, false, false, null);
+            channel.basicPublish("", QUEUE_NAME, null, message.getBytes(StandardCharsets.UTF_8));
+            System.out.println("message publish to RMQ " + message);
+        } catch (IOException e) {
+            throw new RuntimeException("Error: failed to operation on channel. " + e);
+        }
+        this.rmqChannelPool.returnObject(channel);
+        System.out.println(" [x] Sent '" + message + "'");
     }
 }
